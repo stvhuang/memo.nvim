@@ -1,31 +1,31 @@
-local M = {}
-
-M.config = { path = nil }
-
 local function expand_and_resolve_path(path)
-    return vim.uv.fs_realpath(vim.fs.normalize(path))
+    path = vim.fs.normalize(path)
+    path = vim.uv.fs_realpath(path)
+
+    return path
 end
 
 local function get_link_under_cursor()
-    local line = vim.api.nvim_get_current_line()
-    local col = vim.api.nvim_win_get_cursor(0)[2] + 1
+    local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+    local result = nil
 
-    local start_pos = 1
-    while true do
-        local link_start, link_end, _, path = line:find("%[([^%]]*)%]%(([^%)]+)%)", start_pos)
-
-        if not link_start then
-            break
+    vim.treesitter.get_parser(0, "markdown"):for_each_tree(function(tree, ltree)
+        if result or ltree:lang() ~= "markdown_inline" then
+            return
         end
 
-        if col >= link_start and col <= link_end then
-            return path
+        local node = tree:root():named_descendant_for_range(row - 1, col, row - 1, col)
+        while node do
+            if node:type() == "link_destination" then
+                result = vim.treesitter.get_node_text(node, 0)
+                return
+            end
+
+            node = node:parent()
         end
+    end)
 
-        start_pos = link_end + 1
-    end
-
-    return nil
+    return result
 end
 
 local function open_link()
@@ -43,6 +43,12 @@ local function open_link()
     vim.cmd.edit(target_path)
 end
 
+local M = {
+    config = {
+        path = nil,
+    },
+}
+
 function M.setup(opts)
     M.config = vim.tbl_extend("force", M.config, opts or {})
     if M.config.path == nil then
@@ -52,7 +58,6 @@ function M.setup(opts)
     M.config.path = expand_and_resolve_path(M.config.path)
 
     vim.api.nvim_create_autocmd("BufEnter", {
-        pattern = "*.md",
         callback = function(ev)
             local buf_path = expand_and_resolve_path(vim.api.nvim_buf_get_name(ev.buf))
             if buf_path:sub(1, #M.config.path) == M.config.path then
@@ -61,6 +66,7 @@ function M.setup(opts)
                 end, { buffer = ev.buf, desc = "(memo) follow markdown link" })
             end
         end,
+        pattern = "*.md",
     })
 end
 
