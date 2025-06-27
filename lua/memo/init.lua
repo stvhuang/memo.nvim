@@ -7,25 +7,22 @@ end
 
 local function get_link_under_cursor()
     local row, col = unpack(vim.api.nvim_win_get_cursor(0))
-    local result = nil
+    local node = vim.treesitter
+        .get_parser(0, "markdown")
+        :named_node_for_range({ row - 1, col, row - 1, col }, { ignore_injections = false })
 
-    vim.treesitter.get_parser(0, "markdown"):for_each_tree(function(tree, ltree)
-        if result or ltree:lang() ~= "markdown_inline" then
-            return
+    while node do
+        if node:type() == "link_destination" then
+            return vim.treesitter.get_node_text(node, 0)
         end
 
-        local node = tree:root():named_descendant_for_range(row - 1, col, row - 1, col)
-        while node do
-            if node:type() == "link_destination" then
-                result = vim.treesitter.get_node_text(node, 0)
-                return
-            end
-
-            node = node:parent()
+        if node:type() == "inline_link" then
+            local dest = node:named_child(1)
+            return dest and vim.treesitter.get_node_text(dest, 0)
         end
-    end)
 
-    return result
+        node = node:parent()
+    end
 end
 
 local function open_link()
@@ -60,10 +57,8 @@ function M.setup(opts)
     vim.api.nvim_create_autocmd("BufEnter", {
         callback = function(ev)
             local buf_path = expand_and_resolve_path(vim.api.nvim_buf_get_name(ev.buf))
-            if buf_path:sub(1, #M.config.path) == M.config.path then
-                vim.keymap.set("n", "<CR>", function()
-                    open_link()
-                end, { buffer = ev.buf, desc = "(memo) follow markdown link" })
+            if vim.startswith(buf_path, M.config.path) then
+                vim.keymap.set("n", "<CR>", open_link, { buffer = ev.buf, desc = "(memo) follow markdown link" })
             end
         end,
         pattern = "*.md",
