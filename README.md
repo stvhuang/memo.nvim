@@ -1,5 +1,10 @@
+# memo.nvim
+
+## Usage
+
 ```lua
 require("memo").setup({
-    path = "/path/to/memo",
+    dir = "/path/to/note/dir", -- required
+    entry_point = "README.md", -- optional, default to "README.md"
 })
 ```
