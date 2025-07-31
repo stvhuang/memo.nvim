@@ -1,33 +1,109 @@
-local function get_link_under_cursor()
-    local row, col = unpack(vim.api.nvim_win_get_cursor(0))
-    local node = vim.treesitter.get_parser(0, "markdown"):named_node_for_range({ row - 1, col, row - 1, col }, { ignore_injections = false })
-
-    while node do
-        if node:type() == "link_destination" then
-            return vim.treesitter.get_node_text(node, 0)
+local function get_links()
+    local parser = vim.treesitter.get_parser(0, "markdown")
+    parser:parse(true)
+    local query = vim.treesitter.query.parse("markdown_inline", "(inline_link (link_destination) @dest)")
+    local links = {}
+    parser:for_each_tree(function(tree, ltree)
+        if ltree:lang() == "markdown_inline" then
+            for _, dest_node in query:iter_captures(tree:root(), 0) do
+                local srow, scol, erow, ecol = dest_node:parent():range()
+                table.insert(links, {
+                    srow = srow,
+                    scol = scol,
+                    erow = erow,
+                    ecol = ecol,
+                    dest = vim.treesitter.get_node_text(dest_node, 0),
+                })
+            end
         end
+    end)
+    table.sort(links, function(a, b) return a.srow < b.srow or (a.srow == b.srow and a.scol < b.scol) end)
+    return links
+end
 
-        if node:type() == "inline_link" then
-            local dest = node:named_child(1)
-            return dest and vim.treesitter.get_node_text(dest, 0)
+local function find_link_at_cursor(links)
+    local cur = vim.api.nvim_win_get_cursor(0)
+    local r, c = cur[1] - 1, cur[2]
+    for _, l in ipairs(links) do
+        if (r > l.srow or (r == l.srow and c >= l.scol)) and (r < l.erow or (r == l.erow and c < l.ecol)) then
+            return l
         end
-
-        node = node:parent()
     end
 end
 
+local hl_ns = vim.api.nvim_create_namespace("memo_link_hl")
+
+local function jump_link(forward)
+    local links = get_links()
+    if #links == 0 then
+        return
+    end
+
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local row, col = cursor[1] - 1, cursor[2]
+
+    local target
+    if forward then
+        for _, l in ipairs(links) do
+            if l.srow > row or (l.srow == row and l.scol > col) then
+                target = l
+                break
+            end
+        end
+        target = target or links[1]
+    else
+        for i = #links, 1, -1 do
+            local l = links[i]
+            if l.srow < row or (l.srow == row and l.scol < col) then
+                target = l
+                break
+            end
+        end
+        target = target or links[#links]
+    end
+
+    vim.api.nvim_win_set_cursor(0, { target.srow + 1, target.scol })
+
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_clear_namespace(bufnr, hl_ns, 0, -1)
+    vim.api.nvim_buf_set_extmark(bufnr, hl_ns, target.srow, target.scol, {
+        end_row = target.erow,
+        end_col = target.ecol,
+        hl_group = "Search",
+    })
+end
+
 local function open_link()
-    local link = get_link_under_cursor()
+    local link = find_link_at_cursor(get_links())
     if not link then
         vim.notify("memo: No markdown link under cursor", vim.log.levels.WARN)
         return
     end
 
-    local current_file = vim.api.nvim_buf_get_name(0)
-    local current_dir = vim.fs.dirname(current_file)
-    local target_path = vim.fs.normalize(vim.fs.joinpath(current_dir, link))
+    local current_dir = vim.fs.dirname(vim.api.nvim_buf_get_name(0))
+    local target_path = vim.fs.normalize(vim.fs.joinpath(current_dir, link.dest))
 
     vim.cmd.edit(target_path)
+end
+
+local function attach_to_buffer(buf, group)
+    vim.keymap.set("n", "<CR>", open_link, { buffer = buf, desc = "(memo) follow markdown link" })
+    vim.keymap.set("n", "<Tab>", function() jump_link(true) end, { buffer = buf, desc = "(memo) next link" })
+    vim.keymap.set("n", "<S-Tab>", function() jump_link(false) end, { buffer = buf, desc = "(memo) prev link" })
+    vim.api.nvim_create_autocmd("CursorMoved", {
+        group = group,
+        buffer = buf,
+        callback = function()
+            local marks = vim.api.nvim_buf_get_extmarks(buf, hl_ns, 0, -1, {})
+            if #marks == 0 then
+                return
+            end
+            local cur = vim.api.nvim_win_get_cursor(0)
+            if cur[1] - 1 ~= marks[1][2] or cur[2] ~= marks[1][3] then
+                vim.api.nvim_buf_clear_namespace(buf, hl_ns, 0, -1)
+            end
+        end,
+    })
 end
 
 local M = {
@@ -64,7 +140,7 @@ function M.setup(opts)
             local normalized = vim.fs.normalize(name)
             local buf_path = vim.uv.fs_realpath(normalized) or normalized
             if vim.startswith(buf_path, prefix) then
-                vim.keymap.set("n", "<CR>", open_link, { buffer = ev.buf, desc = "(memo) follow markdown link" })
+                attach_to_buffer(ev.buf, group)
             end
         end,
     })
